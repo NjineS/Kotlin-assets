@@ -1,15 +1,15 @@
-name: Extract Kotlin assets
+name: Extract and Release Kotlin Assets
 
 on:
   schedule:
-    - cron: "0 8 * * 0"   # Every Sunday 08:00 UTC
+    - cron: "0 10 * * 0"   # Every Sunday 10:00 UTC
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  extract:
+  extract-and-release:
     runs-on: ubuntu-latest
 
     steps:
@@ -21,64 +21,59 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget dpkg grep
+          sudo apt-get install -y wget dpkg zip grep
 
-      - name: Get latest Kotlin version
-        id: get_version
-        run: |
-          BASE_URL="https://packages.termux.dev/apt/termux-main/pool/main/k/kotlin/"
-          wget -qO- "$BASE_URL" | grep -o 'kotlin_[0-9.]\+_all\.deb' | sort -V | tail -n1 > latest.txt
-          FILE=$(cat latest.txt)
-          VERSION=$(echo "$FILE" | sed -E 's/kotlin_([0-9.]+)_all\.deb/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "file=$FILE" >> $GITHUB_OUTPUT
-          echo "Detected Kotlin version: $VERSION"
+      - name: Prepare directories
+        run: mkdir -p downloads extracted
 
-      - name: Download and extract Kotlin
+      - name: Extract Kotlin package
+        id: extract
         run: |
           set -e
           BASE_URL="https://packages.termux.dev/apt/termux-main/pool/main/k/kotlin/"
-          VERSION="${{ steps.get_version.outputs.version }}"
-          FILE="kotlin_${VERSION}_all.deb"
-          URL="${BASE_URL}${FILE}"
 
-          echo "⬇️ Downloading $URL"
-          wget -q "$URL" -O "$FILE"
+          echo "🔍 Checking for latest Kotlin package..."
+          FILE=$(wget -qO- "$BASE_URL" | grep -o "kotlin_[0-9.\-]\+_all\.deb" | sort -V | tail -n1 || true)
 
-          mkdir -p kotlin-extract/tmp
-          dpkg-deb -x "$FILE" kotlin-extract/tmp
-
-          SRC="kotlin-extract/tmp/data/data/com.termux/files/usr"
-          DEST="kotlin"
-
-          if [ -d "$SRC" ]; then
-            rm -rf "$DEST"
-            mkdir -p "$DEST"
-            cp -a "$SRC/." "$DEST/"
-            echo "✅ Extracted full Kotlin assets"
-          else
-            echo "❌ Extraction failed: $SRC not found"
+          if [ -z "$FILE" ]; then
+            echo "❌ No Kotlin package found!"
             exit 1
           fi
 
-          rm -rf kotlin-extract/tmp
-          rm -f "$FILE"
+          echo "⬇️ Downloading $FILE"
+          wget -q "${BASE_URL}${FILE}" -O "downloads/$FILE"
 
-      - name: Commit and push Kotlin assets
+          mkdir -p tmp
+          dpkg-deb -x "downloads/$FILE" tmp
+
+          SRC="tmp/data/data/com.termux/files/usr"
+          if [ ! -d "$SRC" ]; then
+            echo "❌ Extraction failed — $SRC missing"
+            exit 1
+          fi
+
+          cp -a "$SRC/." extracted/
+          VERSION=$(echo "$FILE" | sed -E 's/kotlin_([0-9.\-]+)_.*/\1/')
+          echo "✅ Extracted Kotlin version $VERSION"
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          rm -rf tmp
+
+      - name: Compress extracted Kotlin folder
+        run: |
+          cd extracted
+          zip -r "../kotlin-${{ steps.extract.outputs.version }}.zip" .
+          echo "📦 Created kotlin-${{ steps.extract.outputs.version }}.zip"
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Kotlin (latest)"
+          tag_name: "kotlin-latest"
+          files: "kotlin-*.zip"
+          body: |
+            Extracted from Termux Kotlin package.
+            Version: `${{ steps.extract.outputs.version }}`
+            Source: [Termux Kotlin packages](https://packages.termux.dev/apt/termux-main/pool/main/k/kotlin/)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git fetch origin main
-          git checkout main
-          git reset --hard origin/main
-
-          if [ -n "$(git status --porcelain kotlin)" ]; then
-            git add kotlin
-            git commit -m "Extracted Kotlin ${{ steps.get_version.outputs.version }} assets"
-            git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git main
-          else
-            echo "No updates found."
-          fi
