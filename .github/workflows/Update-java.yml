@@ -1,0 +1,90 @@
+name: Extract OpenJDK assets
+
+on:
+  schedule:
+    - cron: "0 9 * * 0"   # Every Sunday 09:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget dpkg grep
+
+      - name: Prepare directories
+        run: |
+          mkdir -p arm64-v8a armeabi-v7a x86 x86_64
+
+      - name: Extract OpenJDK for all architectures
+        run: |
+          set -e
+          BASE_URL="https://packages.termux.dev/apt/termux-main/pool/main/o/openjdk-21/"
+
+          declare -A ABIS=(
+            ["aarch64"]="arm64-v8a"
+            ["arm"]="armeabi-v7a"
+            ["i686"]="x86"
+            ["x86_64"]="x86_64"
+          )
+
+          for ARCH in "${!ABIS[@]}"; do
+            DEST="${ABIS[$ARCH]}"
+            echo "Processing $ARCH → $DEST"
+
+            FILE=$(wget -qO- "$BASE_URL" | grep -o "openjdk-21_[0-9.\-]\+_${ARCH}\.deb" | sort -V | tail -n1 || true)
+
+            if [ -z "$FILE" ]; then
+              echo "❌ No package found for $ARCH — skipping"
+              continue
+            fi
+
+            echo "⬇️ Downloading $FILE"
+            wget -q "${BASE_URL}${FILE}" -O "$FILE"
+
+            mkdir -p tmp-"$ARCH"
+            dpkg-deb -x "$FILE" tmp-"$ARCH"
+
+            SRC="tmp-${ARCH}/data/data/com.termux/files/usr"
+            if [ -d "$SRC" ]; then
+              rm -rf "$DEST"
+              mkdir -p "$DEST"
+              cp -a "$SRC/." "$DEST/"
+              echo "✅ Extracted OpenJDK for $ARCH into $DEST"
+            else
+              echo "❌ Extraction failed for $ARCH — $SRC missing"
+              exit 1
+            fi
+
+            rm -rf tmp-"$ARCH" "$FILE"
+          done
+
+      - name: Commit and push extracted OpenJDK assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
+
+          if [ -n "$(git status --porcelain arm64-v8a armeabi-v7a x86 x86_64)" ]; then
+            git add arm64-v8a armeabi-v7a x86 x86_64
+            git commit -m "Extracted latest OpenJDK 21 assets for all ABIs"
+            git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git main
+          else
+            echo "No updates found."
+          fi
